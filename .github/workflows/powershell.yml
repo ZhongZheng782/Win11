@@ -10,7 +10,7 @@ jobs:
       name: Run Script
       runs-on: [Windows, x64, Self-hosted]
       steps:
-        - uses: actions/checkout@v2
+        - uses: actions/checkout@v4
         - name: Script
-          run: .\script.ps1
+          run: .\setup.ps1
           shell: powershell

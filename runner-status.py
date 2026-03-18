@@ -4,8 +4,8 @@ GITHUB_API_ENDPOINT1 = f"https://api.github.com/orgs/{ENDPOINT1_ORG}/actions/run
 ENDPOINT1_FIRST_ID                 = 2
 ENDPOINT1_LAST_ID                  = 3
 # GitHub API endpoint 2
-ENDPOINT2_ORG="wenchiehlee"
-ENDPOINT2_REPO="Win11Deploy"
+ENDPOINT2_ORG="ZhongZheng782"
+ENDPOINT2_REPO="Win11"
 
 GITHUB_API_ENDPOINT2 = f"https://api.github.com/repos/{ENDPOINT2_ORG}/{ENDPOINT2_REPO}/actions/runners"
 ENDPOINT2_FIRST_ID                 = 4
@@ -38,7 +38,7 @@ load_dotenv()
 # Store credentials
 ENDPOINT1_HEADER_TOKEN            = os.getenv('ENDPOINT1_HEADER_TOKEN')
 ENDPOINT2_HEADER_TOKEN            = os.getenv('ENDPOINT2_HEADER_TOKEN')
-GDRIVE_API_CREDENTIALS  = os.getenv('GDRIVE_API_CREDENTIALS')
+GDRIVE_API_CREDENTIALS            = os.getenv('GDRIVE_API_CREDENTIALS')
 
 # ------------------------------------------------------------------
 ## Authorize
@@ -68,7 +68,7 @@ data_F = wks.get_value('F2')
 elapsed = (now - datetime.strptime(data_F,"%Y-%m-%d %H:%M:%S"))
 elapsed_minutes =  round(elapsed.total_seconds() / 60, 1)
 
-if (  elapsed_minutes < 15):
+if (  elapsed_minutes < 5):
     print(f"Already updated by others in {elapsed_minutes}m! Quit!")
     quit()
 
