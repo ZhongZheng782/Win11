@@ -1,78 +1,129 @@
 # switch-hosts.ps1
 # Pure ASCII script. Optimized for ZERO-FLASHING and THROTTLED notifications.
+param([switch]$NotifyOnly)
 
-$logFile = "$env:TEMP\MarsHostSwitcher.log"
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+$sharedDir  = "C:\ProgramData\MarsHostSwitcher"
+if (-not (Test-Path $sharedDir)) { New-Item -ItemType Directory -Path $sharedDir -Force | Out-Null }
+$logFile    = "$sharedDir\MarsHostSwitcher.log"
+$resultFile = "$sharedDir\MarsHostSwitcher.result"
 
 # --- THROTTLE CHECK ---
-# Prevent multiple notifications within 10 seconds
-$lastRunFile = "$env:TEMP\MarsHostSwitcher.lastrun"
+$throttleKey = if ($NotifyOnly) { "notify" } else { "main" }
+$lastRunFile = "$sharedDir\MarsHostSwitcher.$throttleKey.lastrun"
 if (Test-Path $lastRunFile) {
-    $lastRunTime = Get-Date (Get-Content $lastRunFile)
-    if ((Get-Date) -lt $lastRunTime.AddSeconds(10)) {
-        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Throttled (Ran too recently)" | Out-File $logFile -Append
-        Exit
+    $lastRunRaw = Get-Content $lastRunFile | Select-Object -Last 1
+    if ($lastRunRaw) {
+        try {
+            $lastRunTime = Get-Date $lastRunRaw
+            if ((Get-Date) -lt $lastRunTime.AddSeconds(10)) {
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Throttled (Ran too recently)" | Out-File $logFile -Append -Encoding UTF8
+                Exit
+            }
+        } catch {}
     }
 }
-Get-Date | Out-File $lastRunFile
-
-"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Script started (Admin: $isAdmin)" | Out-File $logFile -Append
-
-# Wait for network stability
-Start-Sleep -Seconds 5
-
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $scriptRoot) { $scriptRoot = Get-Location }
-$templateFile = Join-Path $scriptRoot "hosts.template"
-$hostsPath = "C:\Windows\System32\drivers\etc\hosts"
-$synologyIP = "192.168.31.101" 
-$homeSSID = "Mars"
-
-if (-not (Test-Path $templateFile)) {
-    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Error: hosts.template not found" | Out-File $logFile -Append
-    Break
-}
-
-$currentNetworks = Get-NetConnectionProfile | Select-Object -ExpandProperty Name
-$isMars = $currentNetworks -contains $homeSSID
-$canPing = Test-Connection -ComputerName $synologyIP -Count 1 -Quiet
+Get-Date | Set-Content $lastRunFile
 
 function Show-Notification {
     param([string]$Title, [string]$Message)
     try {
-        $ErrorActionPreference = "Stop"
-        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-        $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-        $textNodes = $template.GetElementsByTagName("text")
-        $textNodes.Item(0).AppendChild($template.CreateTextNode($Title)) > $null
-        $textNodes.Item(1).AppendChild($template.CreateTextNode($Message)) > $null
-        $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
-        $toast.ExpirationTime = [DateTimeOffset]::Now.AddSeconds(5)
-        
-        # AppID: ???? (Registered via shortcut in install-task.ps1)
-        $appName = [char]0x7DB2 + [char]0x8DEF + [char]0x8A2D + [char]0x5B9A
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appName).Show($toast)
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $icon = [System.Windows.Forms.NotifyIcon]::new()
+        $icon.Icon = [System.Drawing.SystemIcons]::Information
+        $icon.Visible = $true
+        $icon.BalloonTipTitle = $Title
+        $icon.BalloonTipText  = $Message
+        $icon.ShowBalloonTip(5000)
+        Start-Sleep -Milliseconds 6000
+        $icon.Dispose()
     } catch {
-        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Notification Error: $_" | Out-File $logFile -Append
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Notification Error: $_" | Out-File $logFile -Append -Encoding UTF8
     }
 }
 
-if ($isMars -or $canPing) {
-    $atHome = $true
-    $title = [char]0xD83C + [char]0xDFE1 + " " + [char]0x5728 + [char]0x5BB6 + [char]0x4E2D + ".."
-    $msg = [char]0x5DF2 + [char]0x9023 + [char]0x7DDA + [char]0x81F3 + " $homeSSID, NAS " + [char]0x8A2D + [char]0x5B9A + [char]0x5DF2 + [char]0x540C + [char]0x6B65 + [char]0x3002
-    Show-Notification -Title $title -Message $msg
-} else {
-    $atHome = $false
-    $title = [char]0xD83C + [char]0xDFE2 + " " + [char]0x5728 + [char]0x5916 + [char]0x9762 + ".."
-    $msg = [char]0x7DB2 + [char]0x8DEF + [char]0x5DF2 + [char]0x5207 + [char]0x63DB + " ($currentNetworks), NAS " + [char]0x8A2D + [char]0x5B9A + [char]0x5DF2 + [char]0x505C + [char]0x7528 + [char]0x3002
-    Show-Notification -Title $title -Message $msg
+# =============================================================
+# NOTIFY-ONLY MODE: wait for SYSTEM task result, then show toast
+# =============================================================
+if ($NotifyOnly) {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - NotifyOnly: waiting for sync result..." | Out-File $logFile -Append -Encoding UTF8
+
+    # Poll up to 40 seconds for a FRESH result file (written within last 60s)
+    $waited = 0
+    $result = $null
+    while ($waited -lt 40) {
+        if (Test-Path $resultFile) {
+            $age = (Get-Date) - (Get-Item $resultFile).LastWriteTime
+            if ($age.TotalSeconds -lt 60) {
+                $result = Get-Content $resultFile | Select-Object -Last 1
+                Remove-Item $resultFile -Force -ErrorAction SilentlyContinue
+                break
+            }
+        }
+        Start-Sleep -Seconds 2
+        $waited += 2
+    }
+
+    if (-not $result) {
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - NotifyOnly: Timeout waiting for sync result, no toast shown." | Out-File $logFile -Append -Encoding UTF8
+        Exit
+    }
+
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - NotifyOnly: result=$result" | Out-File $logFile -Append -Encoding UTF8
+
+    # Only show toast if SYSTEM task succeeded
+    if ($result -match "^SUCCESS:(True|False)$") {
+        $atHome = $Matches[1] -eq "True"
+        if ($atHome) {
+            $title = [char]0x5728 + [char]0x5BB6 + " - Mars " + [char]0x5DF2 + [char]0x9023 + [char]0x7DDA
+            $msg   = "NAS " + [char]0x8A2D + [char]0x5B9A + [char]0x5DF2 + [char]0x540C + [char]0x6B65 + [char]0x3002
+        } else {
+            $title = [char]0x5916 + [char]0x51FA + " - " + [char]0x5DF2 + [char]0x96E2 + [char]0x958B + " Mars"
+            $msg   = "NAS " + [char]0x8A2D + [char]0x5B9A + [char]0x5DF2 + [char]0x505C + [char]0x7528 + [char]0x3002
+        }
+        Show-Notification -Title $title -Message $msg
+    }
+    Exit
 }
 
-if (-not $isAdmin) { Break }
+# =============================================================
+# SYSTEM MODE: detect network, sync hosts, write result file
+# =============================================================
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Script started (Admin: $isAdmin)" | Out-File $logFile -Append -Encoding UTF8
 
-$startMarker = "# === SYNOLOGY START ==="
-$endMarker = "# === SYNOLOGY END ==="
+# Wait for network stability
+Start-Sleep -Seconds 10
+
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $scriptRoot) { $scriptRoot = Get-Location }
+$templateFile = Join-Path $scriptRoot "hosts.template"
+$hostsPath    = "C:\Windows\System32\drivers\etc\hosts"
+$synologyIP   = "192.168.31.101"
+$homeSSIDPattern = "*Mars*"
+
+if (-not (Test-Path $templateFile)) {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Error: hosts.template not found at $templateFile" | Out-File $logFile -Append -Encoding UTF8
+    "FAILED" | Set-Content $resultFile
+    Exit
+}
+
+if (-not $isAdmin) {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Warning: Not running as Admin. Cannot sync hosts." | Out-File $logFile -Append -Encoding UTF8
+    "FAILED" | Set-Content $resultFile
+    Exit
+}
+
+$currentNetworks = Get-NetConnectionProfile | Select-Object -ExpandProperty Name
+$isMars = $false
+foreach ($net in $currentNetworks) {
+    if ($net -like $homeSSIDPattern) { $isMars = $true; break }
+}
+$canPing = Test-Connection -ComputerName $synologyIP -Count 1 -Quiet
+$atHome  = ($isMars -or $canPing)
+"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Network: $($currentNetworks -join ', '), IsMars: $isMars, CanPing: $canPing" | Out-File $logFile -Append -Encoding UTF8
+
+$startMarker   = "# === SYNOLOGY START ==="
+$endMarker     = "# === SYNOLOGY END ==="
 $templateLines = Get-Content $templateFile
 if (-not $atHome) {
     $templateLines = $templateLines | ForEach-Object { if ($_ -match "\S" -and $_ -notmatch "^#") { "#" + $_ } else { $_ } }
@@ -80,18 +131,17 @@ if (-not $atHome) {
 
 $maxRetries = 5
 $retryCount = 0
-$success = $false
+$success    = $false
 while (-not $success -and $retryCount -lt $maxRetries) {
     try {
         $ErrorActionPreference = "Stop"
         $currentHosts = Get-Content $hostsPath
-        $newHosts = @()
-        $inSection = $false
+        $newHosts     = @()
+        $inSection    = $false
         $sectionFound = $false
         foreach ($line in $currentHosts) {
             if ($line -eq $startMarker) {
-                $inSection = $true
-                $sectionFound = $true
+                $inSection = $true; $sectionFound = $true
                 $newHosts += $startMarker
                 $newHosts += $templateLines
                 continue
@@ -112,11 +162,17 @@ while (-not $success -and $retryCount -lt $maxRetries) {
         $success = $true
     } catch {
         $retryCount++
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Sync retry $retryCount due to: $_" | Out-File $logFile -Append -Encoding UTF8
         Start-Sleep -Seconds 1
     }
 }
 
 if ($success) {
     ipconfig /flushdns
-    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Sync success" | Out-File $logFile -Append
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Sync success (AtHome: $atHome)" | Out-File $logFile -Append -Encoding UTF8
+    "SUCCESS:$atHome" | Set-Content $resultFile
+} else {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Sync FAILED after $maxRetries retries." | Out-File $logFile -Append -Encoding UTF8
+    "FAILED" | Set-Content $resultFile
 }
+

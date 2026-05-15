@@ -7,9 +7,11 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Break
 }
 
-$taskName = "MarsHostSwitcher"
-$oldTaskName = "SyncSynologyHosts"
-$scriptPath = Join-Path (Get-Location) "switch-hosts.ps1"
+$taskName       = "MarsHostSwitcher"
+$notifyTaskName = "MarsHostSwitcherNotify"
+$oldTaskName    = "SyncSynologyHosts"
+$scriptPath     = Join-Path (Get-Location) "switch-hosts.ps1"
+$vbsPath        = Join-Path (Get-Location) "launcher.vbs"
 
 if (-not (Test-Path $scriptPath)) {
     Write-Error "Could not find switch-hosts.ps1!"
@@ -18,12 +20,12 @@ if (-not (Test-Path $scriptPath)) {
 }
 
 # 移除舊任務（如果存在）
-if (Get-ScheduledTask -TaskName $oldTaskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $oldTaskName -Confirm:$false
-    Write-Host "Removed old task '$oldTaskName'."
+foreach ($old in @($oldTaskName, $taskName, $notifyTaskName)) {
+    if (Get-ScheduledTask -TaskName $old -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $old -Confirm:$false
+        Write-Host "Removed old task '$old'."
+    }
 }
-
-$vbsPath = Join-Path (Get-Location) "launcher.vbs"
 
 # 建立捷徑以註冊 AppID: 網路設定
 $shortcutName = "網路設定"
@@ -35,16 +37,10 @@ if (-not (Test-Path $shortcutPath)) {
     $Shortcut.Save()
 }
 
-$userSid = (Get-WmiObject Win32_UserAccount -Filter "Name='$env:USERNAME' and Domain='$env:USERDOMAIN'").SID
+$userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
-# 定義任務 XML
-$taskXml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Date>$(Get-Date -Format "yyyy-MM-ddTHH:mm:ss")</Date>
-    <Author>$env:COMPUTERNAME\$env:USERNAME</Author>
-  </RegistrationInfo>
+# --- 共用 Trigger 區段 ---
+$triggers = @"
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
@@ -59,13 +55,10 @@ $taskXml = @"
       <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"&gt;&lt;Select Path="Microsoft-Windows-NetworkProfile/Operational"&gt;*[System[(EventID=10000)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
     </EventTrigger>
   </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <UserId>$userSid</UserId>
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
+"@
+
+# --- 共用 Settings 區段 ---
+$settings = @"
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
@@ -90,21 +83,72 @@ $taskXml = @"
       <Count>3</Count>
     </RestartOnFailure>
   </Settings>
+"@
+
+# =============================================================
+# Task 1: MarsHostSwitcher — 以 SYSTEM 執行，負責修改 hosts 檔案
+# =============================================================
+$mainTaskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>$(Get-Date -Format "yyyy-MM-ddTHH:mm:ss")</Date>
+    <Author>$env:COMPUTERNAME\$env:USERNAME</Author>
+    <Description>Runs as SYSTEM to update hosts file when network changes.</Description>
+  </RegistrationInfo>
+$triggers
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+$settings
   <Actions Context="Author">
     <Exec>
-      <Command>wscript.exe</Command>
-      <Arguments>"$vbsPath" "$scriptPath"</Arguments>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$scriptPath"</Arguments>
     </Exec>
   </Actions>
 </Task>
 "@
 
-# 註冊任務
-Register-ScheduledTask -Xml $taskXml -TaskName $taskName -Force
+# =============================================================
+# Task 2: MarsHostSwitcherNotify — 以目前用戶執行，負責顯示 Toast 通知
+# =============================================================
+$notifyTaskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>$(Get-Date -Format "yyyy-MM-ddTHH:mm:ss")</Date>
+    <Author>$env:COMPUTERNAME\$env:USERNAME</Author>
+    <Description>Runs as current user to show Toast notification when network changes.</Description>
+  </RegistrationInfo>
+$triggers
+  <Principals>
+    <Principal id="Author">
+      <UserId>$userSid</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+$settings
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>"$vbsPath" "$scriptPath" -NotifyOnly</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
 
-Write-Host "Successfully installed '$taskName'." -ForegroundColor Green
-Write-Host "The task will run:"
-Write-Host "1. On Log on"
-Write-Host "2. On Network change (SSID: Mars)"
-Write-Host "3. On Workstation unlock"
-# No pause for non-interactive execution
+# 註冊兩個任務
+Register-ScheduledTask -Xml $mainTaskXml   -TaskName $taskName       -Force
+Register-ScheduledTask -Xml $notifyTaskXml -TaskName $notifyTaskName -Force
+
+Write-Host ""
+Write-Host "Successfully installed tasks:" -ForegroundColor Green
+Write-Host "  '$taskName'       — runs as SYSTEM, modifies hosts file" -ForegroundColor Cyan
+Write-Host "  '$notifyTaskName' — runs as $env:USERNAME, shows Toast notification" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Both tasks trigger on: Logon / Network change / Workstation unlock"
