@@ -122,6 +122,27 @@ $canPing = Test-Connection -ComputerName $synologyIP -Count 1 -Quiet
 $atHome  = ($isMars -or $canPing)
 "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Network: $($currentNetworks -join ', '), IsMars: $isMars, CanPing: $canPing" | Out-File $logFile -Append -Encoding UTF8
 
+# --- Cisco AnyConnect DNS Fix ---
+$adapterName = "Ethernet 2"
+try {
+    $adapter = Get-NetAdapter -Name $adapterName -ErrorAction SilentlyContinue
+    if ($adapter) {
+        if ($atHome) {
+            if ($adapter.Status -ne "Disabled") {
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - At home: Disabling $adapterName to fix DNS issues." | Out-File $logFile -Append -Encoding UTF8
+                Disable-NetAdapter -Name $adapterName -Confirm:$false
+            }
+        } else {
+            if ($adapter.Status -eq "Disabled") {
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Away: Enabling $adapterName for potential VPN use." | Out-File $logFile -Append -Encoding UTF8
+                Enable-NetAdapter -Name $adapterName -Confirm:$false
+            }
+        }
+    }
+} catch {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Error toggling $($adapterName): $_" | Out-File $logFile -Append -Encoding UTF8
+}
+
 $startMarker   = "# === SYNOLOGY START ==="
 $endMarker     = "# === SYNOLOGY END ==="
 $templateLines = Get-Content $templateFile
