@@ -4,12 +4,20 @@ param([switch]$NotifyOnly)
 
 # -WindowStyle Hidden alone still lets the console flash briefly on some
 # hosts (e.g. Windows Terminal as default terminal app); hide it immediately.
+# Only do this when launched by Task Scheduler (parent process is the
+# Schedule service / its host, not an interactive shell) so that running
+# this script by hand from your own PowerShell window behaves normally.
 try {
-    Add-Type -Name Win -Namespace Console -MemberDefinition '
-        [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
-    ' -ErrorAction Stop
-    [Console.Win]::ShowWindow([Console.Win]::GetConsoleWindow(), 0) | Out-Null
+    $parentId   = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+    $parentName = (Get-CimInstance Win32_Process -Filter "ProcessId=$parentId" -ErrorAction Stop).Name
+    $interactiveParents = @('powershell.exe', 'pwsh.exe', 'WindowsTerminal.exe', 'cmd.exe', 'explorer.exe')
+    if ($parentName -notin $interactiveParents) {
+        Add-Type -Name Win -Namespace Console -MemberDefinition '
+            [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmdShow);
+        ' -ErrorAction Stop
+        [Console.Win]::ShowWindow([Console.Win]::GetConsoleWindow(), 0) | Out-Null
+    }
 } catch {}
 
 $sharedDir  = "C:\ProgramData\MarsHostSwitcher"
@@ -27,7 +35,7 @@ if (Test-Path $lastRunFile) {
             $lastRunTime = Get-Date $lastRunRaw
             if ((Get-Date) -lt $lastRunTime.AddSeconds(10)) {
                 "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Throttled (Ran too recently)" | Out-File $logFile -Append -Encoding UTF8
-                Exit
+                return
             }
         } catch {}
     }
@@ -75,7 +83,7 @@ if ($NotifyOnly) {
 
     if (-not $result) {
         "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - NotifyOnly: Timeout waiting for sync result, no toast shown." | Out-File $logFile -Append -Encoding UTF8
-        Exit
+        return
     }
 
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - NotifyOnly: result=$result" | Out-File $logFile -Append -Encoding UTF8
@@ -92,7 +100,7 @@ if ($NotifyOnly) {
         }
         Show-Notification -Title $title -Message $msg
     }
-    Exit
+    return
 }
 
 # =============================================================
@@ -114,13 +122,13 @@ $homeSSIDPattern = "*Mars*"
 if (-not (Test-Path $templateFile)) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Error: hosts.template not found at $templateFile" | Out-File $logFile -Append -Encoding UTF8
     "FAILED" | Set-Content $resultFile
-    Exit
+    return
 }
 
 if (-not $isAdmin) {
     "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Warning: Not running as Admin. Cannot sync hosts." | Out-File $logFile -Append -Encoding UTF8
     "FAILED" | Set-Content $resultFile
-    Exit
+    return
 }
 
 $currentNetworks = Get-NetConnectionProfile | Select-Object -ExpandProperty Name
