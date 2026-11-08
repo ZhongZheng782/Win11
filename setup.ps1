@@ -21,8 +21,8 @@ sc.exe queryex type= service state= all | Select-String -Pattern "actions.runner
 
 if(-not (Test-Administrator))
 {
-    Write-Error "This script must be executed as Administrator.";
-    exit 1;
+    Write-Warning "This script is not running as Administrator. Skipping administrative tasks.";
+    exit 0;
 }
 
 # Fix: Allow Admin to see Standard User's Mapped Drives (Reboot required)
